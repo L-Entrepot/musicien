@@ -2,17 +2,22 @@ import discord
 from discord.ext import commands
 import os
 import random
+import asyncio
 
 TOKEN = 'TOKEN'
-GUILD_ID = GUILD_ID
-VOICE_CHANNEL_ID = VOICE_CHANNEL_ID
-TEXT_CHANNEL_ID = TEXT_CHANNEL_ID
+GUILD_ID = 702856435570311250
+VOICE_CHANNEL_ID = 1308106410373943429
+TEXT_CHANNEL_ID = 797561414067290152
 MUSIC_FOLDER = './musiques'
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='+', intents=intents)
 
 played_songs = []
+
+# Ajout d'une variable pour suivre l'état de la connexion
+voice_reconnect_attempts = 0
+MAX_RECONNECT_ATTEMPTS = 5
 
 @bot.event
 async def on_ready():
@@ -31,47 +36,84 @@ async def on_disconnect():
 async def on_resumed():
     print("Connexion rétablie.")
 
-async def join_and_play_random_music(voice_channel):
-    global played_songs
-    music_files = [f for f in os.listdir(MUSIC_FOLDER) if os.path.isfile(os.path.join(MUSIC_FOLDER, f))]
-    if not music_files:
+@bot.event
+async def on_voice_state_update(member, before, after):
+    global voice_reconnect_attempts
+    if member.id == bot.user.id:
+        if before.channel and not after.channel:  # Bot déconnecté
+            voice_reconnect_attempts = 0
+            print("Bot déconnecté du salon vocal, tentative de reconnexion...")
+            voice_channel = discord.utils.get(member.guild.voice_channels, id=VOICE_CHANNEL_ID)
+            if voice_channel:
+                await attempt_reconnect(voice_channel)
+
+async def attempt_reconnect(voice_channel):
+    global voice_reconnect_attempts
+    if voice_reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+        print("Nombre maximum de tentatives de reconnexion atteint")
         return
-    if len(played_songs) == len(music_files):
-        played_songs = []
-    remaining_songs = list(set(music_files) - set(played_songs))
-    random_music = random.choice(remaining_songs)
-    played_songs.append(random_music)
-    file_path = os.path.join(MUSIC_FOLDER, random_music)
-    print(f"Lecture de {random_music}")
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=random_music))
-    vc = discord.utils.get(bot.voice_clients, guild=voice_channel.guild)
-    if not vc or not vc.is_connected():
-        try:
-            vc = await voice_channel.connect()
-        except discord.errors.ConnectionClosed as e:
-            print(f"Erreur de connexion: {e}")
+
+    try:
+        voice_reconnect_attempts += 1
+        print(f"Tentative de reconnexion {voice_reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS}")
+        await join_and_play_random_music(voice_channel)
+    except Exception as e:
+        print(f"Erreur lors de la reconnexion: {e}")
+        await asyncio.sleep(5)  # Attendre 5 secondes avant de réessayer
+        await attempt_reconnect(voice_channel)
+
+async def join_and_play_random_music(voice_channel):
+    global played_songs, voice_reconnect_attempts
+    try:
+        music_files = [f for f in os.listdir(MUSIC_FOLDER) if os.path.isfile(os.path.join(MUSIC_FOLDER, f))]
+        if not music_files:
             return
-    if vc.is_playing():
-        vc.stop()
-    vc.play(discord.FFmpegPCMAudio(file_path), after=lambda e: bot.loop.create_task(play_next(voice_channel)))
+        if len(played_songs) == len(music_files):
+            played_songs = []
+        remaining_songs = list(set(music_files) - set(played_songs))
+        random_music = random.choice(remaining_songs)
+        played_songs.append(random_music)
+        file_path = os.path.join(MUSIC_FOLDER, random_music)
+        print(f"Lecture de {random_music}")
+        await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=random_music))
+        vc = discord.utils.get(bot.voice_clients, guild=voice_channel.guild)
+        if not vc or not vc.is_connected():
+            try:
+                vc = await voice_channel.connect()
+                voice_reconnect_attempts = 0  # Réinitialiser le compteur après une connexion réussie
+            except Exception as e:
+                print(f"Erreur de connexion: {e}")
+                raise
+                
+        if vc.is_playing():
+            vc.stop()
+        vc.play(discord.FFmpegPCMAudio(file_path), after=lambda e: bot.loop.create_task(play_next(voice_channel)))
+    except Exception as e:
+        print(f"Erreur dans join_and_play_random_music: {e}")
+        if voice_reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
+            await asyncio.sleep(5)
+            await attempt_reconnect(voice_channel)
 
 async def play_next(voice_channel):
     await join_and_play_random_music(voice_channel)
 
 @bot.command(name='skip')
 async def skip(ctx):
-    if ctx.channel.id != TEXT_CHANNEL_ID:
-        await ctx.send("Cette commande n'est pas disponible dans ce salon.")
+    if not ctx.author.voice or ctx.author.voice.channel.id != VOICE_CHANNEL_ID:
+        await ctx.send("Vous devez être dans le bon salon vocal pour utiliser cette commande.")
         return
+
     vc = discord.utils.get(bot.voice_clients, guild=ctx.guild)
     if not vc or not vc.is_connected():
         await ctx.send("Je ne suis pas connecté à un salon vocal.")
         return
+
     if vc.is_playing():
         vc.stop()
         await ctx.send("⏩ Passage à la musique suivante.")
     else:
         await ctx.send("Aucune musique en cours de lecture.")
+    
     voice_channel = discord.utils.get(ctx.guild.voice_channels, id=VOICE_CHANNEL_ID)
     if voice_channel:
         await play_next(voice_channel)
